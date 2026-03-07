@@ -1,0 +1,67 @@
+-- data/001_init.sql
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    pswd TEXT NOT NULL,
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    modified_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    color_code TEXT NOT NULL DEFAULT '#3498db',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    modified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    step_order INTEGER NOT NULL,
+    spacing_days INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    color_code TEXT NOT NULL DEFAULT '#95a5a6',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    modified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(step_order, user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    category_id INTEGER NOT NULL,
+    current_step_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    next_review_date DATETIME NOT NULL,
+    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    modified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_step_id) REFERENCES steps(id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    user_response TEXT,
+    step INTEGER NOT NULL,
+    is_correct BOOLEAN NOT NULL,
+    days_since_last_answer INTEGER NOT NULL,
+    days_since_creation INTEGER NOT NULL,
+    late_spacing_days INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
