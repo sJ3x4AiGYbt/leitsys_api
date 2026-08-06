@@ -1,4 +1,4 @@
-use crate::models::Claims;
+use crate::models::{Claims, RefreshClaims};
 use axum::{
     Json,
     extract::{Request, State},
@@ -6,7 +6,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use jsonwebtoken::{DecodingKey, Validation, decode};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde_json::json;
 
 use crate::db::AppState;
@@ -49,17 +49,14 @@ pub async fn require_auth(
     Ok(next.run(req).await)
 }
 
-pub fn generate_token(
+pub fn generate_access_token(
     user_id: i64,
     username: &str,
     is_admin: bool,
     secret: &str,
-    expiration_hours: i64,
 ) -> anyhow::Result<String> {
-    use jsonwebtoken::{EncodingKey, Header, encode};
-
     let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::hours(expiration_hours))
+        .checked_add_signed(chrono::Duration::minutes(15))
         .expect("valid timestamp")
         .timestamp() as usize;
 
@@ -75,4 +72,32 @@ pub fn generate_token(
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )?)
+}
+
+pub fn generate_refresh_token(
+    user_id: i64,
+    secret: &str,
+) -> anyhow::Result<String> {
+    let expiration = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::days(7))
+        .expect("valid timestamp")
+        .timestamp() as usize;
+
+    let claims = RefreshClaims { user_id, exp: expiration };
+
+    Ok(encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )?)
+}
+
+pub fn extract_refresh_claims(token: &str, secret: &str) -> Option<RefreshClaims> {
+    decode::<RefreshClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .ok()
+    .map(|d| d.claims)
 }

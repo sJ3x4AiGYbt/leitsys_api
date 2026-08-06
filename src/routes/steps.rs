@@ -91,7 +91,7 @@ pub async fn get_step(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Step>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let step = sqlx::query_as::<_, Step>("SELECT title, step_order, spacing_days, user_id, color_code, created_at, modified_at FROM steps WHERE id = ?")
+    let step = sqlx::query_as::<_, Step>("SELECT * FROM steps WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -130,7 +130,7 @@ pub async fn get_my_steps(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
     
-    let steps = sqlx::query_as::<_, Step>("SELECT title, step_order, spacing_days, color_code, created_at, modified_at FROM steps WHERE user_id = ?")
+    let steps = sqlx::query_as::<_, Step>("SELECT * FROM steps WHERE user_id = ?")
         .bind(user_id)
         .fetch_all(&state.db)
         .await
@@ -317,7 +317,7 @@ pub async fn delete_step(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     let existing = sqlx::query_as::<_, Step>(
-        "SELECT step_order, user_id FROM steps WHERE id = ?"
+        "SELECT * FROM steps WHERE id = ?"
     )
     .bind(id)
     .fetch_one(&state.db)

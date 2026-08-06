@@ -70,7 +70,7 @@ pub async fn get_category(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Category>>, (StatusCode, Json<ApiResponse<()>>)> {    
-    let category = sqlx::query_as::<_, Category>("SELECT title, user_id, color_code, created_at, modified_at FROM categories WHERE id = ?")
+    let category = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -109,7 +109,7 @@ pub async fn get_my_categories(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let categories = sqlx::query_as::<_, Category>("SELECT title, color_code, created_at, modified_at FROM categories WHERE user_id = ? ORDER BY created_at")
+    let categories = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE user_id = ? ORDER BY created_at")
         .bind(user_id)
         .fetch_all(&state.db)
         .await
@@ -178,7 +178,7 @@ pub async fn update_category(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<UpdateCategory>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let existing = sqlx::query_as::<_, Category>("SELECT title, user_id, color_code FROM categories WHERE id = ?")
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -234,7 +234,7 @@ pub async fn delete_category(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let existing = sqlx::query_as::<_, Category>("SELECT id, user_id FROM categories WHERE id = ?")
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await

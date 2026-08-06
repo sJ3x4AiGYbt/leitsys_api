@@ -10,6 +10,7 @@ use axum::{
     routing::{get, patch, post},
 };
 use tower_http::trace::TraceLayer;
+use tower_cookies::CookieManagerLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::{SwaggerUi, Config};
 
@@ -31,11 +32,11 @@ use crate::routes::{
         update_question,
     },
     steps::{
-        create_step, delete_step, get_all_steps, get_my_steps, get_step, update_step
+        create_step, delete_step, get_all_steps, get_my_steps, get_step, update_step,
     },
     users::{
-        create_user, delete_user, get_all_users, get_user, login, mark_admin, mark_blocked, 
-        update_user,
+        create_user, delete_user, get_all_users, get_user, login, logout, mark_admin, mark_blocked, 
+        refresh, update_user,
     },    
 };
 
@@ -44,6 +45,10 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/auth/login", post(login))
         .route("/auth/register", post(create_user));
+
+    let auth_cookie_routes = Router::new()
+        .route("/auth/refresh", post(refresh))
+        .route("/auth/logout", post(logout));
 
     let user_routes = Router::new()
         .route("/users", get(get_all_users))
@@ -96,7 +101,9 @@ pub fn build_router(state: AppState) -> Router {
             )
         )
         .merge(public)
+        .merge(auth_cookie_routes)
         .merge(user_routes)
+        .layer(CookieManagerLayer::new())
         .layer(cors::cors_layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
