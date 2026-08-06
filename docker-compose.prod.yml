@@ -1,0 +1,13 @@
+services:
+  api:
+    image: ghcr.io/sJ3x4AiGYbt/leitsys_api:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - leitsys_prod_data:/app/data
+    env_file:
+      - .env.prod
+
+volumes:
+  leitsys_prod_data:
