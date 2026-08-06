@@ -23,5 +23,5 @@ target
 
 # Added by cargo
 
-*.env
+*.env*
 *.db

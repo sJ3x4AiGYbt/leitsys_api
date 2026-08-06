@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let pool = db::create_pool().await?;
+    db::seed_admin(&pool).await?;
     let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret_change_me".into());
 
     let state = db::AppState {

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-// ─── User ─────────────────────────────────────────────────────────────────────
+// ─── User
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct User {
@@ -42,7 +42,7 @@ pub struct LoginResponse {
     pub access_token: String,
 }
 
-// ─── Category ─────────────────────────────────────────────────────────────────
+// ─── Category 
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Category {
@@ -66,7 +66,7 @@ pub struct UpdateCategory {
     pub color_code: Option<String>,
 }
 
-// ─── Step ─────────────────────────────────────────────────────────────────────
+// ─── Step
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Step {
@@ -95,7 +95,7 @@ pub struct UpdateStep {
     pub color_code: Option<String>,
 }
 
-// ─── Question ─────────────────────────────────────────────────────────────────
+// ─── Question 
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Question {
@@ -138,7 +138,7 @@ pub struct UpdateQuestion {
     pub current_step_id: Option<i64>,
 }
 
-// ─── Answer ───────────────────────────────────────────────────────────────────
+// ─── Answer ──
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Answer {
@@ -167,7 +167,7 @@ pub struct UpdateAnswer {
     pub user_response: Option<String>,
 }
 
-// ─── JWT Claims ───────────────────────────────────────────────────────────────
+// ─── JWT Claims 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
@@ -183,7 +183,7 @@ pub struct RefreshClaims {
     pub exp: usize,
 }
 
-// ─── Generic responses ────────────────────────────────────────────────────────
+// ─── Generic responses 
 
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {

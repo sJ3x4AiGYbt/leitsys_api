@@ -1,0 +1,22 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/app
+      - cargo_registry:/usr/local/cargo/registry
+      - target_cache:/app/target
+      - leitsys_dev_data:/app/data
+    env_file:
+      - .env.dev
+    environment:
+      - DATABASE_URL=sqlite:/app/data/leitsys.db
+
+volumes:
+  cargo_registry:
+  target_cache:
+  leitsys_dev_data:
