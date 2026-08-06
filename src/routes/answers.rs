@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::{
     db::AppState,
@@ -40,7 +40,7 @@ pub async fn create_answer(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateAnswer>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let question = sqlx::query_as::<_, Question>("SELECT id, user_id, next_review_date, created_at FROM questions WHERE id = ?")
+    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(payload.question_id)
         .fetch_one(&state.db)
         .await
@@ -50,18 +50,22 @@ pub async fn create_answer(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let last = sqlx::query_as::<_, Answer>("SELECT user_id, created_at FROM answers WHERE id_question = ? ORDER BY created_at DESC LIMIT 1")
-        .bind(question.id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("Answer not found"))))?;
-    
-    if !claims.is_admin && last.user_id != claims.user_id {
-        return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
+    let last = sqlx::query_as::<_, (i64, Option<DateTime<Utc>>)>(
+        "SELECT user_id, created_at FROM answers WHERE question_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(question.id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    if let Some((last_user_id, _)) = last {
+        if !claims.is_admin && last_user_id != claims.user_id {
+            return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
+        }
     }
 
     let now = Utc::now();
-    let days_since_last_answer = last.created_at.map(|d| (now - d).num_days()).unwrap_or(0);
+    let days_since_last_answer = last.and_then(|(_, d)| d).map(|d| (now - d).num_days()).unwrap_or(0);
     let days_since_creation = question.created_at.map(|d| (now - d).num_days()).unwrap_or(0);
     let late_spacing_days = if question.next_review_date < now {
         (now - question.next_review_date).num_days()
@@ -69,11 +73,12 @@ pub async fn create_answer(
         0
     };
 
-    sqlx::query("INSERT INTO answers (question_id, user_id, user_response, step, days_since_last_answer, days_since_creation, late_spacing_days) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO answers (question_id, user_id, user_response, step, is_correct, days_since_last_answer, days_since_creation, late_spacing_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(&payload.question_id)
     .bind(claims.user_id)
     .bind(&payload.user_response)
     .bind(&payload.step)
+    .bind(payload.is_correct)
     .bind(days_since_last_answer)
     .bind(days_since_creation)
     .bind(late_spacing_days)
@@ -108,7 +113,7 @@ pub async fn get_answer(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Answer>>, (StatusCode, Json<ApiResponse<()>>)> {    
-    let answer = sqlx::query_as::<_, Answer>("SELECT question_id, user_id, user_response, step, days_since_last_answer, days_since_creation, is_correct, created_at FROM answers WHERE id = ?")
+    let answer = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -147,7 +152,7 @@ pub async fn get_my_answers(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let answers = sqlx::query_as::<_, Answer>("SELECT question_id, user_id, user_response, step, days_since_last_answer, days_since_creation, is_correct, created_at FROM answers WHERE user_id = ? ORDER BY created_at")
+    let answers = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE user_id = ? ORDER BY created_at")
         .bind(user_id)
         .fetch_all(&state.db)
         .await
@@ -180,7 +185,7 @@ pub async fn get_all_answers(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
     
-    let answers = sqlx::query_as::<_, Answer>("SELECT question_id, user_id, user_response, step, days_since_last_answer, days_since_creation, is_correct, created_at FROM answers ORDER BY user_id, created_at")
+    let answers = sqlx::query_as::<_, Answer>("SELECT * FROM answers ORDER BY user_id, created_at")
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
@@ -218,7 +223,7 @@ pub async fn update_answer(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let existing = sqlx::query_as::<_, Answer>("SELECT id, user_response FROM answers WHERE id = ?")
+    let existing = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -267,7 +272,7 @@ pub async fn good_answer(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let answer = sqlx::query_as::<_, Answer>("SELECT question_id, user_id FROM answers WHERE id = ?")
+    let answer = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -277,7 +282,7 @@ pub async fn good_answer(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let question = sqlx::query_as::<_, Question>("SELECT user_id, current_step_id FROM questions WHERE id = ?")
+    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(answer.question_id)
         .fetch_one(&state.db)
         .await
@@ -358,7 +363,7 @@ pub async fn bad_answer(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let answer = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE id = ?") // besoin que de : question_id, user_id
+    let answer = sqlx::query_as::<_, Answer>("SELECT * FROM answers WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -368,7 +373,7 @@ pub async fn bad_answer(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let question = sqlx::query_as::<_, Question>("SELECT user_id FROM questions WHERE id = ?")
+    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(answer.question_id)
         .fetch_one(&state.db)
         .await

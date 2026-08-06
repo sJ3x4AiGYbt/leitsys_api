@@ -1,14 +1,16 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     Extension, Json,
 };
 use bcrypt::{hash, DEFAULT_COST};
 use chrono::Utc;
+use tower_cookies::{Cookie, Cookies};
 
 use crate::{
     db::AppState,
-    middleware::generate_token,
+    middleware::{generate_access_token, generate_refresh_token, extract_refresh_claims},
     models::{ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse},
 };
 
@@ -37,7 +39,7 @@ use crate::{
 pub async fn create_user(
     State(state): State<AppState>,
     Json(payload): Json<CreateUser>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<(StatusCode, Json<ApiResponse<()>>), (StatusCode, Json<ApiResponse<()>>)> {
     let hashed = hash(&payload.pswd, DEFAULT_COST)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Hashing failed"))))?;
 
@@ -100,22 +102,25 @@ pub async fn create_user(
     tx.commit().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
 
-    Ok(Json(ApiResponse::<()>::message("User created successfully.")))
+    Ok((StatusCode::CREATED, Json(ApiResponse::<()>::message("User created successfully."))))
 }
 
-/// Authenticates a user and returns a JWT valid for 24 hours.
+/// Authenticates a user.
+///
+/// Returns an access token (15 min) in the response body
+/// and sets a HttpOnly refresh token cookie (7 days, Path=/auth).
 ///
 /// # Errors
 /// - `401 Unauthorized` — invalid credentials
 /// - `403 Forbidden`    — account is blocked
-/// - `500 Internal Server Error` — database error
+/// - `500 Internal Server Error` — database or token error
 #[utoipa::path(
     post,
     path = "/auth/login",
     tag = "auth",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "JWT token", body = LoginResponse),
+        (status = 200, description = "Access token + HttpOnly refresh cookie", body = LoginResponse),
         (status = 401, description = "Invalid credentials"),
         (status = 403, description = "Account is blocked"),
         (status = 500, description = "Internal error"),
@@ -123,31 +128,126 @@ pub async fn create_user(
 )]
 pub async fn login(
     State(state): State<AppState>,
+    cookies: Cookies,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<ApiResponse<LoginResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let user = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at FROM users WHERE username = ?")
-        .bind(&payload.username)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))))?;
-
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse<()>>)> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at \
+         FROM users WHERE username = ?",
+    )
+    .bind(&payload.username)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))))?;
+ 
     if user.is_blocked {
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Account is blocked"))));
     }
-
+ 
     let valid = bcrypt::verify(&payload.pswd, &user.pswd)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Verification failed"))))?;
-
+ 
     if !valid {
         return Err((StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))));
     }
-
-    let token = generate_token(user.id, &user.username, user.is_admin, &state.jwt_secret, 24)
+ 
+    let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
+ 
+    let refresh_token = generate_refresh_token(user.id, &state.jwt_secret)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
+ 
+    let mut cookie = Cookie::new("refresh_token", refresh_token);
+    cookie.set_http_only(true);
+    cookie.set_secure(true);
+    // Frontend and API run on different origins (different ports/hosts), so the
+    // cookie must be sent on cross-site fetch requests — `Strict` or `Lax` would
+    // silently prevent the browser from ever sending it back to the API.
+    cookie.set_same_site(tower_cookies::cookie::SameSite::None);
+    cookie.set_path("/auth");
+    cookie.set_max_age(tower_cookies::cookie::time::Duration::days(7));
+    cookies.add(cookie);
+ 
+    Ok(Json(ApiResponse::ok(LoginResponse { access_token })))
+}
+ 
+/// Renews the access token using the HttpOnly refresh cookie.
+///
+/// The browser sends the cookie automatically — no JS access needed.
+/// Also verifies that the account is not blocked before issuing a new token.
+///
+/// # Errors
+/// - `401 Unauthorized` — cookie absent, invalid or expired
+/// - `403 Forbidden`    — account is blocked
+/// - `500 Internal Server Error` — database or token error
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    tag = "auth",
+    responses(
+        (status = 200, description = "New access token", body = LoginResponse),
+        (status = 401, description = "Missing or invalid refresh token"),
+        (status = 403, description = "Account is blocked"),
+        (status = 500, description = "Internal error"),
+    )
+)]
+pub async fn refresh(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> Result<Json<ApiResponse<LoginResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let refresh_token = cookies
+        .get("refresh_token")
+        .map(|c| c.value().to_string())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<()>::error("No refresh token")),
+        ))?;
+ 
+    let claims = extract_refresh_claims(&refresh_token, &state.jwt_secret)
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<()>::error("Invalid or expired refresh token")),
+        ))?;
+ 
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at \
+         FROM users WHERE id = ?",
+    )
+    .bind(claims.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("User not found"))))?;
+ 
+    if user.is_blocked {
+        return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Account is blocked"))));
+    }
+ 
+    let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
+ 
+    Ok(Json(ApiResponse::ok(LoginResponse { access_token })))
+}
 
-    Ok(Json(ApiResponse::ok(LoginResponse {
-        token
-    })))
+/// Logs out the current user by expiring the refresh token cookie.
+///
+/// The backend sets `Max-Age=0` on the cookie — the browser suppresses it immediately.
+/// The access token in memory on the frontend must be cleared client-side.
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Logged out, cookie revoked"),
+    )
+)]
+pub async fn logout(cookies: Cookies) -> impl IntoResponse {
+    let cookie = Cookie::build(("refresh_token", ""))
+        .path("/auth")
+        .max_age(tower_cookies::cookie::time::Duration::seconds(0))
+        .build();
+    cookies.remove(cookie);
+ 
+    Json(ApiResponse::<()>::message("Logged out"))
 }
 
 /// Returns a user profile by its ID.
@@ -178,7 +278,7 @@ pub async fn get_user(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, created_at, modified_at FROM users WHERE id = ?")
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -251,7 +351,7 @@ pub async fn update_user(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let existing = sqlx::query_as::<_, User>("SELECT id, username, email, pswd FROM users WHERE id = ?")
+    let existing = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -309,12 +409,16 @@ pub async fn mark_admin(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    sqlx::query("UPDATE users SET is_admin = NOT is_admin, modified_at = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE users SET is_admin = NOT is_admin, modified_at = ? WHERE id = ?")
     .bind(Utc::now())
     .bind(id)
     .execute(&state.db)
     .await
-    .map_err(|_| (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("User not found"))))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("User not found"))));
+    }
 
     Ok(Json(ApiResponse::<()>::message("User status changed to admin.")))
 }
@@ -349,12 +453,16 @@ pub async fn mark_blocked(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    sqlx::query("UPDATE users SET is_blocked = NOT is_blocked, modified_at = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE users SET is_blocked = NOT is_blocked, modified_at = ? WHERE id = ?")
     .bind(Utc::now())
     .bind(id)
     .execute(&state.db)
     .await
-    .map_err(|_| (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("User not found"))))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("User not found"))));
+    }
 
     Ok(Json(ApiResponse::<()>::message("User blocked successfully.")))
 }

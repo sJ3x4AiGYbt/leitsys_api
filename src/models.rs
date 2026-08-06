@@ -39,7 +39,7 @@ pub struct LoginRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
-    pub token: String,
+    pub access_token: String,
 }
 
 // ─── Category ─────────────────────────────────────────────────────────────────
@@ -159,6 +159,7 @@ pub struct CreateAnswer {
     pub question_id: i64,
     pub user_response: String,
     pub step: i64,
+    pub is_correct: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -173,6 +174,12 @@ pub struct Claims {
     pub user_id: i64,
     pub username: String,
     pub is_admin: bool,
+    pub exp: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RefreshClaims {
+    pub user_id: i64,
     pub exp: usize,
 }
 

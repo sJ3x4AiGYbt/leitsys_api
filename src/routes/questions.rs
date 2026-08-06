@@ -127,7 +127,7 @@ pub async fn get_question(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<Question>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let question = sqlx::query_as::<_, Question>("SELECT title, answer, category_id, current_step_id, user_id, next_review_date, is_archived, created_at, modified_at FROM questions WHERE id = ?")
+    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -187,10 +187,9 @@ pub async fn get_my_questions(
     let today = Utc::now();
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT title, answer, category_id, current_step_id, user_id, next_review_date, is_archived, created_at, modified_at FROM questions WHERE user_id = "
+        "SELECT * FROM questions WHERE user_id = "
     );
     qb.push_bind(claims.user_id);
-    qb.push(" AND is_completed = FALSE");
 
     match params.status.as_deref() {
         Some("todo") => {
@@ -269,7 +268,7 @@ pub async fn get_all_questions(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let questions = sqlx::query_as::<_, Question>("SELECT id, title, answer, category_id, current_step_id, user_id, next_review_date, is_archived, is_completed, created_at, modified_at FROM questions ORDER BY created_at DESC")
+    let questions = sqlx::query_as::<_, Question>("SELECT * FROM questions ORDER BY created_at DESC")
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
@@ -306,7 +305,7 @@ pub async fn update_question(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<UpdateQuestion>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let existing = sqlx::query_as::<_, Question>("SELECT title, answer, category_id, current_step_id, user_id, next_review_date, is_archived FROM questions WHERE id = ?")
+    let existing = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
@@ -395,7 +394,7 @@ pub async fn delete_question(
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
-    let existing = sqlx::query_as::<_, Question>("SELECT user_id FROM questions WHERE id = ?")
+    let existing = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await
