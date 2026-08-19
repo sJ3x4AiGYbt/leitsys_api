@@ -1,7 +1,5 @@
 # Leitsys - Application Programming Interface
 
-## Overview
-
 Implementation of the **Ebbinghaus spaced repetition method** for learning. Each question progresses through **steps** whose intervals increase with correct answers. An incorrect answer resets the question to the first step.
 
 ```
