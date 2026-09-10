@@ -1,6 +1,7 @@
 use bcrypt::{hash, DEFAULT_COST};
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{SqlitePool, sqlite::{SqlitePoolOptions, SqliteConnectOptions}};
 use std::env;
+use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -10,10 +11,11 @@ pub struct AppState {
 
 pub async fn create_pool() -> anyhow::Result<SqlitePool> {
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./leitsys.db".into());
+    let connect_options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&database_url)
+        .connect_with(connect_options)
         .await?;
 
     sqlx::query("PRAGMA foreign_keys = ON")
