@@ -10,11 +10,11 @@ services:
       - ./:/app
       - cargo_registry:/usr/local/cargo/registry
       - target_cache:/app/target
-      - leitsys_dev_data:/app/data
+      - leitsys_dev_data:/app/rundata
     env_file:
       - .env.dev
     environment:
-      - DATABASE_URL=sqlite:/app/data/leitsys.db
+      - DATABASE_URL=sqlite:/app/rundata/leitsys.db
 
 volumes:
   cargo_registry:
