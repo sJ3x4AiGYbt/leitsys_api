@@ -60,6 +60,7 @@ pub struct User {
     pub failed_attempts: i64,
     #[serde(skip_serializing)]
     pub locked_until: Option<DateTime<Utc>>,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub modified_at: Option<DateTime<Utc>>,
 }
@@ -101,6 +102,18 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub access_token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct VerifyEmailRequest {
+    #[validate(length(min = 1, max = 128))]
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct ResendVerificationRequest {
+    #[validate(email, length(max = 254))]
+    pub email: String,
 }
 
 // ─── Category 

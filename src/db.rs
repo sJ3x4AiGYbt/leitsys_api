@@ -7,6 +7,8 @@ use std::str::FromStr;
 pub struct AppState {
     pub db: SqlitePool,
     pub jwt_secret: String,
+    pub mailer: crate::mailer::Mailer,
+    pub mail_from: String,
 }
 
 pub async fn create_pool() -> anyhow::Result<SqlitePool> {
@@ -33,6 +35,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("001_init.sql", include_str!("../data/001_init.sql")),
     ("002_login_security.sql", include_str!("../data/002_login_security.sql")),
     ("003_refresh_sessions.sql", include_str!("../data/003_refresh_sessions.sql")),
+    ("004_email_verification.sql", include_str!("../data/004_email_verification.sql")),
 ];
 
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
@@ -116,8 +119,10 @@ pub async fn seed_admin(pool: &SqlitePool) -> anyhow::Result<()> {
 
     let mut tx = pool.begin().await?;
 
+    // Provisioned via trusted environment variables, not self-registration,
+    // so it's exempt from the email verification required at login.
     let result = sqlx::query(
-        "INSERT INTO users (username, email, pswd, is_admin) VALUES (?, ?, ?, TRUE)",
+        "INSERT INTO users (username, email, pswd, is_admin, email_verified_at) VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP)",
     )
     .bind(&username)
     .bind(&email)

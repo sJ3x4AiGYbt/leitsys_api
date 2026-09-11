@@ -5,7 +5,8 @@ pub mod steps;
 pub mod users;
 
 use axum::{
-    Router, 
+    Router,
+    extract::DefaultBodyLimit,
     middleware as axum_middleware,
     routing::{get, patch, post},
 };
@@ -19,6 +20,7 @@ use std::time::Duration;
 use crate::db::AppState;
 use crate::middleware;
 use crate::rate_limit::{self, RateLimiter};
+use crate::csrf;
 use crate::cors;
 use crate::swagger::ApiDoc;
 use crate::routes::{
@@ -38,9 +40,9 @@ use crate::routes::{
         create_step, delete_step, get_all_steps, get_my_steps, get_step, update_step,
     },
     users::{
-        create_user, delete_user, get_all_users, get_user, login, logout, mark_admin, mark_blocked, 
-        refresh, update_user,
-    },    
+        create_user, delete_user, get_all_users, get_user, login, logout, mark_admin, mark_blocked,
+        refresh, resend_verification, update_user, verify_email,
+    },
 };
 
 
@@ -52,14 +54,24 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/auth/login", post(login))
         .route("/auth/register", post(create_user))
+        .route("/auth/verify-email", post(verify_email))
+        .route("/auth/resend-verification", post(resend_verification))
         .layer(axum_middleware::from_fn_with_state(
             auth_rate_limiter,
             rate_limit::rate_limit,
-        ));
+        ))
+        // Legitimate login/register bodies are a few hundred bytes at most
+        // (validator already caps username/email/password length); axum's
+        // implicit 2MB default is far more than these routes ever need.
+        .layer(DefaultBodyLimit::max(8 * 1024));
 
+    // These two rely solely on a SameSite=None cookie for auth (required since
+    // the frontend is cross-origin), so an Origin/Referer check is needed as a
+    // second line of defense against CSRF.
     let auth_cookie_routes = Router::new()
         .route("/auth/refresh", post(refresh))
-        .route("/auth/logout", post(logout));
+        .route("/auth/logout", post(logout))
+        .layer(axum_middleware::from_fn(csrf::verify_origin));
 
     let user_routes = Router::new()
         .route("/users", get(get_all_users))

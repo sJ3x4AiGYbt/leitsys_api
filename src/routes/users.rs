@@ -12,17 +12,72 @@ use validator::Validate;
 
 use crate::{
     db::AppState,
+    mailer::send_verification_email,
     middleware::{
         generate_access_token, generate_refresh_token, extract_refresh_claims,
         revoke_refresh_session, revoke_all_refresh_sessions,
     },
-    models::{ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse, validation_error_response},
+    models::{
+        ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse,
+        VerifyEmailRequest, ResendVerificationRequest, validation_error_response,
+    },
 };
 
 /// Number of consecutive failed login attempts before an account is locked.
 const MAX_FAILED_LOGIN_ATTEMPTS: i64 = 5;
 /// How long an account stays locked once `MAX_FAILED_LOGIN_ATTEMPTS` is reached.
 const LOCKOUT_MINUTES: i64 = 15;
+/// How long an email verification link stays valid.
+const EMAIL_VERIFICATION_HOURS: i64 = 24;
+
+/// Generates a verification token, stores it, and emails the link to the
+/// user. Errors are the caller's to decide whether to surface or just log —
+/// a failed send shouldn't necessarily fail the request that triggered it.
+async fn issue_and_send_verification_email(
+    state: &AppState,
+    user_id: i64,
+    username: &str,
+    email: &str,
+) -> anyhow::Result<()> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let expires_at = Utc::now() + chrono::Duration::hours(EMAIL_VERIFICATION_HOURS);
+
+    sqlx::query("INSERT INTO email_verification_tokens (token, user_id, expires_at) VALUES (?, ?, ?)")
+        .bind(&token)
+        .bind(user_id)
+        .bind(expires_at)
+        .execute(&state.db)
+        .await?;
+
+    let frontend_origin = std::env::var("FRONTEND_ORIGIN")
+        .map_err(|_| anyhow::anyhow!("FRONTEND_ORIGIN environment variable must be set"))?;
+    let verification_link = format!("{frontend_origin}/verify-email?token={token}");
+
+    // The token already exists in the DB at this point, which is what
+    // actually matters for verification to work. Don't let a slow or
+    // unreachable SMTP server hang the HTTP response — send in the
+    // background with a timeout instead of awaiting it inline.
+    let mailer = state.mailer.clone();
+    let mail_from = state.mail_from.clone();
+    let email = email.to_string();
+    let username = username.to_string();
+
+    tokio::spawn(async move {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_verification_email(&mailer, &mail_from, &email, &username, &verification_link),
+        )
+        .await;
+
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, %email, "failed to send verification email"),
+            Err(_) => tracing::error!(%email, "sending verification email timed out"),
+        }
+    });
+
+    Ok(())
+}
 
 /// Bcrypt hash of an arbitrary, never-used password, computed once per process.
 /// Verifying against it when a username doesn't exist keeps the response time
@@ -134,7 +189,134 @@ pub async fn create_user(
     tx.commit().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
 
-    Ok((StatusCode::CREATED, Json(ApiResponse::<()>::message("User created successfully."))))
+    // The account exists regardless of whether the email actually goes out —
+    // a delivery failure shouldn't strand the user with a 500 and no account.
+    // /auth/resend-verification covers the case where it didn't arrive.
+    if let Err(e) = issue_and_send_verification_email(&state, user_id, &payload.username, &payload.email).await {
+        tracing::error!(error = %e, username = %payload.username, "failed to send verification email");
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::<()>::message(
+            "User created successfully. Please check your email to verify your account.",
+        )),
+    ))
+}
+
+/// Confirms a user's email address using the token sent by `/auth/register`
+/// or `/auth/resend-verification`.
+///
+/// # Errors
+/// - `422 Unprocessable Entity` — malformed token
+/// - `400 Bad Request` — token unknown, already used, or expired
+/// - `429 Too Many Requests` — too many attempts from this IP
+/// - `500 Internal Server Error` — database error
+#[utoipa::path(
+    post,
+    path = "/auth/verify-email",
+    tag = "auth",
+    request_body = VerifyEmailRequest,
+    responses(
+        (status = 200, description = "Email verified"),
+        (status = 422, description = "Validation failed"),
+        (status = 400, description = "Invalid, already-used or expired token"),
+        (status = 429, description = "Too many requests from this IP"),
+        (status = 500, description = "Internal error"),
+    )
+)]
+pub async fn verify_email(
+    State(state): State<AppState>,
+    Json(payload): Json<VerifyEmailRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    payload.validate().map_err(validation_error_response)?;
+
+    let row = sqlx::query_as::<_, (i64, i64, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)>(
+        "SELECT id, user_id, expires_at, used_at FROM email_verification_tokens WHERE token = ?",
+    )
+    .bind(&payload.token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    let (token_id, user_id, expires_at, used_at) = row.ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse::<()>::error("Invalid verification token")),
+    ))?;
+
+    if used_at.is_some() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error("This verification link has already been used"))));
+    }
+    if expires_at < Utc::now() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error("This verification link has expired"))));
+    }
+
+    let mut tx = state.db.begin().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    sqlx::query("UPDATE users SET email_verified_at = ? WHERE id = ?")
+        .bind(Utc::now())
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    sqlx::query("UPDATE email_verification_tokens SET used_at = ? WHERE id = ?")
+        .bind(Utc::now())
+        .bind(token_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    tx.commit().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::<()>::message("Email verified successfully.")))
+}
+
+/// Resends the verification email for an unverified account.
+///
+/// Always returns the same generic message regardless of whether the email
+/// is registered or already verified, to avoid leaking account existence —
+/// a new email is only actually sent when there's something to verify.
+#[utoipa::path(
+    post,
+    path = "/auth/resend-verification",
+    tag = "auth",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 200, description = "Generic acknowledgement (see description)"),
+        (status = 422, description = "Validation failed"),
+        (status = 429, description = "Too many requests from this IP"),
+    )
+)]
+pub async fn resend_verification(
+    State(state): State<AppState>,
+    Json(mut payload): Json<ResendVerificationRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    payload.email = payload.email.trim().to_lowercase();
+    payload.validate().map_err(validation_error_response)?;
+
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, email_verified_at, created_at, modified_at \
+         FROM users WHERE email = ?",
+    )
+    .bind(&payload.email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    if let Some(user) = user {
+        if user.email_verified_at.is_none() {
+            if let Err(e) = issue_and_send_verification_email(&state, user.id, &user.username, &user.email).await {
+                tracing::error!(error = %e, email = %user.email, "failed to resend verification email");
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::<()>::message(
+        "If this email is registered and not yet verified, a new verification link has been sent.",
+    )))
 }
 
 /// Authenticates a user.
@@ -154,7 +336,7 @@ pub async fn create_user(
 /// # Errors
 /// - `422 Unprocessable Entity` — empty/oversized username or password
 /// - `401 Unauthorized` — invalid credentials
-/// - `403 Forbidden`    — account is blocked or temporarily locked
+/// - `403 Forbidden`    — account is blocked, temporarily locked, or email not yet verified
 /// - `500 Internal Server Error` — database or token error
 #[utoipa::path(
     post,
@@ -165,7 +347,7 @@ pub async fn create_user(
         (status = 200, description = "Access token + HttpOnly refresh cookie", body = LoginResponse),
         (status = 422, description = "Validation failed"),
         (status = 401, description = "Invalid credentials"),
-        (status = 403, description = "Account is blocked or temporarily locked"),
+        (status = 403, description = "Account is blocked, temporarily locked, or email not verified"),
         (status = 429, description = "Too many requests from this IP"),
         (status = 500, description = "Internal error"),
     )
@@ -180,7 +362,7 @@ pub async fn login(
     payload.validate().map_err(validation_error_response)?;
 
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at \
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, email_verified_at, created_at, modified_at \
          FROM users WHERE username = ?",
     )
     .bind(&payload.username)
@@ -248,6 +430,16 @@ pub async fn login(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
     }
 
+    // Checked after the password to avoid leaking verification status to
+    // anyone who doesn't already know the password.
+    if user.email_verified_at.is_none() {
+        tracing::warn!(username = %user.username, "login failed: email not verified");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::<()>::error("Please verify your email address before logging in")),
+        ));
+    }
+
     let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
  
@@ -280,7 +472,8 @@ pub async fn login(
 ///
 /// # Errors
 /// - `401 Unauthorized` — cookie absent, invalid, expired or already used/revoked
-/// - `403 Forbidden`    — account is blocked
+/// - `403 Forbidden`    — account is blocked, or the request's Origin/Referer
+///   doesn't match `FRONTEND_ORIGIN` (CSRF check)
 /// - `500 Internal Server Error` — database or token error
 #[utoipa::path(
     post,
@@ -289,7 +482,7 @@ pub async fn login(
     responses(
         (status = 200, description = "New access token + rotated HttpOnly refresh cookie", body = LoginResponse),
         (status = 401, description = "Missing, invalid or already-used refresh token"),
-        (status = 403, description = "Account is blocked"),
+        (status = 403, description = "Account is blocked, or Origin/Referer check failed"),
         (status = 500, description = "Internal error"),
     )
 )]
@@ -313,7 +506,7 @@ pub async fn refresh(
         ))?;
 
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at \
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, email_verified_at, created_at, modified_at \
          FROM users WHERE id = ?",
     )
     .bind(claims.user_id)
@@ -352,12 +545,16 @@ pub async fn refresh(
 ///
 /// The backend sets `Max-Age=0` on the cookie — the browser suppresses it immediately.
 /// The access token in memory on the frontend must be cleared client-side.
+///
+/// # Errors
+/// - `403 Forbidden` — the request's Origin/Referer doesn't match `FRONTEND_ORIGIN` (CSRF check)
 #[utoipa::path(
     post,
     path = "/auth/logout",
     tag = "auth",
     responses(
         (status = 200, description = "Logged out, session revoked and cookie cleared"),
+        (status = 403, description = "Origin/Referer check failed"),
     )
 )]
 pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> impl IntoResponse {
@@ -437,7 +634,7 @@ pub async fn get_all_users(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let users = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at FROM users ORDER BY id")
+    let users = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, email_verified_at, created_at, modified_at FROM users ORDER BY id")
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
