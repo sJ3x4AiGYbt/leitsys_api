@@ -1,11 +1,13 @@
 mod db;
 mod models;
 mod middleware;
+mod rate_limit;
 mod routes;
 mod cors;
 mod swagger;
 
 use std::env;
+use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -30,7 +32,11 @@ async fn main() -> anyhow::Result<()> {
     let addr = "0.0.0.0:3000";
     tracing::info!("Listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
