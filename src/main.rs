@@ -2,6 +2,8 @@ mod db;
 mod models;
 mod middleware;
 mod rate_limit;
+mod csrf;
+mod mailer;
 mod routes;
 mod cors;
 mod swagger;
@@ -29,9 +31,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("JWT_SECRET must be at least 32 characters long");
     }
 
+    let mailer = mailer::build_mailer()?;
+    let mail_from = mailer::required_env("SMTP_FROM")?;
+
     let state = db::AppState {
         db: pool,
         jwt_secret,
+        mailer,
+        mail_from,
     };
 
     let app = routes::build_router(state);
