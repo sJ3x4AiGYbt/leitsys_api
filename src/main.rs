@@ -20,7 +20,14 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::create_pool().await?;
     db::seed_admin(&pool).await?;
-    let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret_change_me".into());
+
+    // No fallback: a missing/weak secret would mean every token in prod is
+    // signed with a value visible in the source code. Fail fast instead.
+    let jwt_secret = env::var("JWT_SECRET")
+        .map_err(|_| anyhow::anyhow!("JWT_SECRET environment variable must be set"))?;
+    if jwt_secret.len() < 32 {
+        anyhow::bail!("JWT_SECRET must be at least 32 characters long");
+    }
 
     let state = db::AppState {
         db: pool,

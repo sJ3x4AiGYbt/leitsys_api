@@ -12,7 +12,10 @@ use validator::Validate;
 
 use crate::{
     db::AppState,
-    middleware::{generate_access_token, generate_refresh_token, extract_refresh_claims},
+    middleware::{
+        generate_access_token, generate_refresh_token, extract_refresh_claims,
+        revoke_refresh_session, revoke_all_refresh_sessions,
+    },
     models::{ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse, validation_error_response},
 };
 
@@ -20,6 +23,19 @@ use crate::{
 const MAX_FAILED_LOGIN_ATTEMPTS: i64 = 5;
 /// How long an account stays locked once `MAX_FAILED_LOGIN_ATTEMPTS` is reached.
 const LOCKOUT_MINUTES: i64 = 15;
+
+/// Bcrypt hash of an arbitrary, never-used password, computed once per process.
+/// Verifying against it when a username doesn't exist keeps the response time
+/// close to the "wrong password" path, so timing can't be used to enumerate
+/// valid usernames.
+static DUMMY_PASSWORD_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn dummy_password_hash() -> &'static str {
+    DUMMY_PASSWORD_HASH.get_or_init(|| {
+        bcrypt::hash("not-a-real-password-timing-decoy", DEFAULT_COST)
+            .expect("dummy hash generation should not fail")
+    })
+}
 
 
 /// Creates a new user account.
@@ -131,6 +147,10 @@ pub async fn create_user(
 /// username, wrong password, blocked or locked account) is logged via
 /// `tracing::warn!`.
 ///
+/// An unknown username still runs a bcrypt verification (against a decoy
+/// hash) before responding, so response time doesn't reveal whether the
+/// username exists.
+///
 /// # Errors
 /// - `422 Unprocessable Entity` — empty/oversized username or password
 /// - `401 Unauthorized` — invalid credentials
@@ -164,12 +184,20 @@ pub async fn login(
          FROM users WHERE username = ?",
     )
     .bind(&payload.username)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|_| {
-        tracing::warn!(username = %payload.username, "login failed: unknown username");
-        (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials")))
-    })?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    let user = match user {
+        Some(user) => user,
+        None => {
+            // Same cost as a real password check, so a missing username
+            // doesn't respond measurably faster than a wrong password.
+            let _ = bcrypt::verify(&payload.pswd, dummy_password_hash());
+            tracing::warn!(username = %payload.username, "login failed: unknown username");
+            return Err((StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))));
+        }
+    };
 
     if user.is_blocked {
         tracing::warn!(username = %user.username, "login failed: account is blocked");
@@ -223,7 +251,8 @@ pub async fn login(
     let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
  
-    let refresh_token = generate_refresh_token(user.id, &state.jwt_secret)
+    let refresh_token = generate_refresh_token(&state.db, user.id, &state.jwt_secret)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
  
     let mut cookie = Cookie::new("refresh_token", refresh_token);
@@ -245,8 +274,12 @@ pub async fn login(
 /// The browser sends the cookie automatically — no JS access needed.
 /// Also verifies that the account is not blocked before issuing a new token.
 ///
+/// The refresh token is single-use: this endpoint revokes the one it was
+/// called with and issues a new one (rotation), so a stolen-but-unused
+/// refresh token stops working the moment the legitimate client refreshes.
+///
 /// # Errors
-/// - `401 Unauthorized` — cookie absent, invalid or expired
+/// - `401 Unauthorized` — cookie absent, invalid, expired or already used/revoked
 /// - `403 Forbidden`    — account is blocked
 /// - `500 Internal Server Error` — database or token error
 #[utoipa::path(
@@ -254,8 +287,8 @@ pub async fn login(
     path = "/auth/refresh",
     tag = "auth",
     responses(
-        (status = 200, description = "New access token", body = LoginResponse),
-        (status = 401, description = "Missing or invalid refresh token"),
+        (status = 200, description = "New access token + rotated HttpOnly refresh cookie", body = LoginResponse),
+        (status = 401, description = "Missing, invalid or already-used refresh token"),
         (status = 403, description = "Account is blocked"),
         (status = 500, description = "Internal error"),
     )
@@ -271,13 +304,14 @@ pub async fn refresh(
             StatusCode::UNAUTHORIZED,
             Json(ApiResponse::<()>::error("No refresh token")),
         ))?;
- 
-    let claims = extract_refresh_claims(&refresh_token, &state.jwt_secret)
+
+    let claims = extract_refresh_claims(&state.db, &refresh_token, &state.jwt_secret)
+        .await
         .ok_or((
             StatusCode::UNAUTHORIZED,
             Json(ApiResponse::<()>::error("Invalid or expired refresh token")),
         ))?;
- 
+
     let user = sqlx::query_as::<_, User>(
         "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at \
          FROM users WHERE id = ?",
@@ -286,18 +320,35 @@ pub async fn refresh(
     .fetch_one(&state.db)
     .await
     .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("User not found"))))?;
- 
+
     if user.is_blocked {
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Account is blocked"))));
     }
- 
+
+    revoke_refresh_session(&state.db, &claims.jti)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
     let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
- 
+
+    let new_refresh_token = generate_refresh_token(&state.db, user.id, &state.jwt_secret)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
+
+    let mut cookie = Cookie::new("refresh_token", new_refresh_token);
+    cookie.set_http_only(true);
+    cookie.set_secure(true);
+    cookie.set_same_site(tower_cookies::cookie::SameSite::None);
+    cookie.set_path("/auth");
+    cookie.set_max_age(tower_cookies::cookie::time::Duration::days(7));
+    cookies.add(cookie);
+
     Ok(Json(ApiResponse::ok(LoginResponse { access_token })))
 }
 
-/// Logs out the current user by expiring the refresh token cookie.
+/// Logs out the current user: revokes the refresh session tied to the
+/// cookie (if any) and expires the cookie itself.
 ///
 /// The backend sets `Max-Age=0` on the cookie — the browser suppresses it immediately.
 /// The access token in memory on the frontend must be cleared client-side.
@@ -306,10 +357,16 @@ pub async fn refresh(
     path = "/auth/logout",
     tag = "auth",
     responses(
-        (status = 200, description = "Logged out, cookie revoked"),
+        (status = 200, description = "Logged out, session revoked and cookie cleared"),
     )
 )]
-pub async fn logout(cookies: Cookies) -> impl IntoResponse {
+pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> impl IntoResponse {
+    if let Some(token) = cookies.get("refresh_token").map(|c| c.value().to_string()) {
+        if let Some(claims) = extract_refresh_claims(&state.db, &token, &state.jwt_secret).await {
+            let _ = revoke_refresh_session(&state.db, &claims.jti).await;
+        }
+    }
+
     let cookie = Cookie::build(("refresh_token", ""))
         .path("/auth")
         .max_age(tower_cookies::cookie::time::Duration::seconds(0))
@@ -433,6 +490,7 @@ pub async fn update_user(
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, Json(ApiResponse::<()>::error("User not found"))))?;
 
+    let password_changed = payload.pswd.is_some();
     let new_pswd = if let Some(p) = payload.pswd {
         hash(p, DEFAULT_COST)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Hashing failed"))))?
@@ -453,6 +511,14 @@ pub async fn update_user(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    // A stolen refresh token issued before a password change must stop
+    // working immediately, not stay valid until it naturally expires.
+    if password_changed {
+        revoke_all_refresh_sessions(&state.db, id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+    }
 
     Ok(Json(ApiResponse::<()>::message("User updated successfully.")))
 }
