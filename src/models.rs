@@ -241,6 +241,10 @@ pub struct Claims {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RefreshClaims {
     pub user_id: i64,
+    /// Unique ID of the `refresh_sessions` row backing this token — lets a
+    /// single refresh token be revoked (logout, password change, rotation)
+    /// without invalidating every token signed with this secret.
+    pub jti: String,
     pub exp: usize,
 }
 

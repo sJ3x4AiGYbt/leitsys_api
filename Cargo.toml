@@ -28,3 +28,4 @@ utoipa-swagger-ui = { version = "7", features = ["axum", "vendored"] }
 anyhow = "1.0.102"
 dotenvy = "0.15"
 validator = { version = "0.18", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }

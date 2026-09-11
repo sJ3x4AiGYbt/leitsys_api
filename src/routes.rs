@@ -64,41 +64,41 @@ pub fn build_router(state: AppState) -> Router {
     let user_routes = Router::new()
         .route("/users", get(get_all_users))
         .route(
-            "/users/{id}",
+            "/users/:id",
             get(get_user).put(update_user).delete(delete_user),
         )
-        .route("/users/{id}/admin", patch(mark_admin))
-        .route("/users/{id}/block", patch(mark_blocked))
+        .route("/users/:id/admin", patch(mark_admin))
+        .route("/users/:id/block", patch(mark_blocked))
         .route("/questions", post(create_question).get(get_all_questions))
         .route(
-            "/questions/{id}",
+            "/questions/:id",
             get(get_question)
                 .put(update_question)
                 .delete(delete_question),
         )
-        .route("/questions/user/{id}", get(get_my_questions))
+        .route("/questions/user/:id", get(get_my_questions))
         .route("/answers", post(create_answer).get(get_all_answers))
         .route(
-            "/answers/{id}",
+            "/answers/:id",
             get(get_answer).put(update_answer).delete(delete_answer),
         )
-        .route("/answers/user/{id}", get(get_my_answers))
-        .route("/answers/{id}/correct", patch(good_answer))
-        .route("/answers/{id}/error", patch(bad_answer))
+        .route("/answers/user/:id", get(get_my_answers))
+        .route("/answers/:id/correct", patch(good_answer))
+        .route("/answers/:id/error", patch(bad_answer))
         .route("/categories", post(create_category).get(get_all_categories))
         .route(
-            "/categories/{id}",
+            "/categories/:id",
             get(get_category)
                 .put(update_category)
                 .delete(delete_category),
         )
-        .route("/categories/user/{id}", get(get_my_categories))
+        .route("/categories/user/:id", get(get_my_categories))
         .route("/steps", post(create_step).get(get_all_steps))
         .route(
-            "/steps/{id}",
+            "/steps/:id",
             get(get_step).put(update_step).delete(delete_step),
         )
-        .route("/steps/user/{id}", get(get_my_steps))
+        .route("/steps/user/:id", get(get_my_steps))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
