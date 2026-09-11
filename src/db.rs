@@ -26,14 +26,56 @@ pub async fn create_pool() -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    let migrations = include_str!("../data/001_init.sql");
+/// Migrations are embedded at compile time and applied in order. Each one is
+/// recorded by filename in `_migrations` so re-running on an existing database
+/// (e.g. `ALTER TABLE` in a later migration) only ever executes once.
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("001_init.sql", include_str!("../data/001_init.sql")),
+    ("002_login_security.sql", include_str!("../data/002_login_security.sql")),
+];
 
-    for stmt in migrations.split(';') {
-        let stmt = stmt.trim();
-        if !stmt.is_empty() && !stmt.starts_with("--") {
-            sqlx::query(stmt).execute(pool).await?;
+async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            filename TEXT PRIMARY KEY,
+            applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    for (filename, sql) in MIGRATIONS {
+        let already_applied: Option<String> =
+            sqlx::query_scalar("SELECT filename FROM _migrations WHERE filename = ?")
+                .bind(filename)
+                .fetch_optional(pool)
+                .await?;
+
+        if already_applied.is_some() {
+            continue;
         }
+
+        // Strip full-line comments before splitting on ';' — otherwise a
+        // comment glued to the following statement (no blank line/semicolon
+        // between them) makes the whole chunk start with "--" and silently
+        // drops the statement instead of just the comment.
+        let sql_without_comments: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for stmt in sql_without_comments.split(';') {
+            let stmt = stmt.trim();
+            if !stmt.is_empty() {
+                sqlx::query(stmt).execute(pool).await?;
+            }
+        }
+
+        sqlx::query("INSERT INTO _migrations (filename) VALUES (?)")
+            .bind(filename)
+            .execute(pool)
+            .await?;
     }
 
     Ok(())

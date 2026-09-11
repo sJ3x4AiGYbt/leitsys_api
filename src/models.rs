@@ -1,6 +1,49 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::{Validate, ValidationError};
+
+fn validate_username(username: &str) -> Result<(), ValidationError> {
+    if username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        Ok(())
+    } else {
+        Err(ValidationError::new(
+            "username may only contain letters, digits, '_', '-' and '.'",
+        ))
+    }
+}
+
+const PASSWORD_SPECIAL_CHARS: &str = "!@#$%^&*()_+-=[]{}|;:,.<>?/~`\"'\\";
+
+/// bcrypt silently truncates anything past 72 bytes, so that limit is enforced
+/// explicitly here rather than letting extra characters be accepted then ignored.
+/// The rest follows an OWASP-style complexity baseline: length plus all four
+/// character classes, rather than just length + one letter/digit.
+fn validate_password(password: &str) -> Result<(), ValidationError> {
+    if password.len() > 72 {
+        return Err(ValidationError::new(
+            "password must not exceed 72 bytes",
+        ));
+    }
+    if password.chars().count() < 10 {
+        return Err(ValidationError::new(
+            "password must be at least 10 characters long",
+        ));
+    }
+    let has_lower = password.chars().any(|c| c.is_lowercase());
+    let has_upper = password.chars().any(|c| c.is_uppercase());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+    let has_special = password.chars().any(|c| PASSWORD_SPECIAL_CHARS.contains(c));
+    if !has_lower || !has_upper || !has_digit || !has_special {
+        return Err(ValidationError::new(
+            "password must contain at least one lowercase letter, one uppercase letter, one digit and one special character",
+        ));
+    }
+    Ok(())
+}
 
 // ─── User
 
@@ -13,27 +56,45 @@ pub struct User {
     pub pswd: String,
     pub is_admin: bool,
     pub is_blocked: bool,
+    #[serde(skip_serializing)]
+    pub failed_attempts: i64,
+    #[serde(skip_serializing)]
+    pub locked_until: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub modified_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Validate)]
 pub struct CreateUser {
+    /// 3-32 characters. Letters, digits, `_`, `-` and `.` only.
+    #[validate(length(min = 3, max = 32), custom(function = "validate_username"))]
     pub username: String,
+    #[validate(email, length(max = 254))]
     pub email: String,
+    /// 10-72 bytes. Must contain at least one lowercase letter, one uppercase
+    /// letter, one digit and one special character.
+    #[validate(custom(function = "validate_password"))]
     pub pswd: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Validate)]
 pub struct UpdateUser {
+    /// 3-32 characters. Letters, digits, `_`, `-` and `.` only.
+    #[validate(length(min = 3, max = 32), custom(function = "validate_username"))]
     pub username: Option<String>,
+    #[validate(email, length(max = 254))]
     pub email: Option<String>,
+    /// 10-72 bytes. Must contain at least one lowercase letter, one uppercase
+    /// letter, one digit and one special character.
+    #[validate(custom(function = "validate_password"))]
     pub pswd: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Validate)]
 pub struct LoginRequest {
+    #[validate(length(min = 1, max = 64))]
     pub username: String,
+    #[validate(length(min = 1, max = 128))]
     pub pswd: String,
 }
 
@@ -214,4 +275,31 @@ impl<T: Serialize> ApiResponse<T> {
             message: Some(msg.into()),
         }
     }
+}
+
+pub fn validation_error_response(
+    errors: validator::ValidationErrors,
+) -> (axum::http::StatusCode, axum::Json<ApiResponse<()>>) {
+    let message = errors
+        .field_errors()
+        .into_iter()
+        .map(|(field, errs)| {
+            let reasons: Vec<String> = errs
+                .iter()
+                .map(|e| {
+                    e.message
+                        .clone()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| e.code.to_string())
+                })
+                .collect();
+            format!("{field}: {}", reasons.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    (
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        axum::Json(ApiResponse::<()>::error(message)),
+    )
 }

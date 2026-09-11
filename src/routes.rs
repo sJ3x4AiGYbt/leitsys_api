@@ -14,8 +14,11 @@ use tower_cookies::CookieManagerLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::{SwaggerUi, Config};
 
+use std::time::Duration;
+
 use crate::db::AppState;
 use crate::middleware;
+use crate::rate_limit::{self, RateLimiter};
 use crate::cors;
 use crate::swagger::ApiDoc;
 use crate::routes::{
@@ -42,9 +45,17 @@ use crate::routes::{
 
 
 pub fn build_router(state: AppState) -> Router {
+    // 10 attempts per minute per IP, shared between login and register — enough
+    // for a legitimate user retrying a typo, not enough for brute-forcing.
+    let auth_rate_limiter = RateLimiter::new(10, Duration::from_secs(60));
+
     let public = Router::new()
         .route("/auth/login", post(login))
-        .route("/auth/register", post(create_user));
+        .route("/auth/register", post(create_user))
+        .layer(axum_middleware::from_fn_with_state(
+            auth_rate_limiter,
+            rate_limit::rate_limit,
+        ));
 
     let auth_cookie_routes = Router::new()
         .route("/auth/refresh", post(refresh))

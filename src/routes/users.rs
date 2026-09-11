@@ -8,11 +8,18 @@ use bcrypt::{hash, DEFAULT_COST};
 use chrono::Utc;
 use tower_cookies::{Cookie, Cookies};
 
+use validator::Validate;
+
 use crate::{
     db::AppState,
     middleware::{generate_access_token, generate_refresh_token, extract_refresh_claims},
-    models::{ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse},
+    models::{ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse, validation_error_response},
 };
+
+/// Number of consecutive failed login attempts before an account is locked.
+const MAX_FAILED_LOGIN_ATTEMPTS: i64 = 5;
+/// How long an account stays locked once `MAX_FAILED_LOGIN_ATTEMPTS` is reached.
+const LOCKOUT_MINUTES: i64 = 15;
 
 
 /// Creates a new user account.
@@ -23,7 +30,9 @@ use crate::{
 /// - a "Default" category
 ///
 /// # Errors
+/// - `422 Unprocessable Entity` — invalid username/email/password (see field rules on `CreateUser`)
 /// - `409 Conflict` — username or email already in use
+/// - `429 Too Many Requests` — too many registration attempts from this IP
 /// - `500 Internal Server Error` — database error
 #[utoipa::path(
     post,
@@ -32,14 +41,21 @@ use crate::{
     request_body = CreateUser,
     responses(
         (status = 201, description = "User created"),
+        (status = 422, description = "Validation failed"),
         (status = 409, description = "Username or email already taken"),
+        (status = 429, description = "Too many requests from this IP"),
         (status = 500, description = "Internal error"),
     )
 )]
 pub async fn create_user(
     State(state): State<AppState>,
-    Json(payload): Json<CreateUser>,
+    Json(mut payload): Json<CreateUser>,
 ) -> Result<(StatusCode, Json<ApiResponse<()>>), (StatusCode, Json<ApiResponse<()>>)> {
+    payload.username = payload.username.trim().to_string();
+    payload.email = payload.email.trim().to_lowercase();
+
+    payload.validate().map_err(validation_error_response)?;
+
     let hashed = hash(&payload.pswd, DEFAULT_COST)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Hashing failed"))))?;
 
@@ -110,9 +126,15 @@ pub async fn create_user(
 /// Returns an access token (15 min) in the response body
 /// and sets a HttpOnly refresh token cookie (7 days, Path=/auth).
 ///
+/// After `MAX_FAILED_LOGIN_ATTEMPTS` consecutive wrong passwords, the account
+/// is locked for `LOCKOUT_MINUTES` minutes. Every failed attempt (unknown
+/// username, wrong password, blocked or locked account) is logged via
+/// `tracing::warn!`.
+///
 /// # Errors
+/// - `422 Unprocessable Entity` — empty/oversized username or password
 /// - `401 Unauthorized` — invalid credentials
-/// - `403 Forbidden`    — account is blocked
+/// - `403 Forbidden`    — account is blocked or temporarily locked
 /// - `500 Internal Server Error` — database or token error
 #[utoipa::path(
     post,
@@ -121,36 +143,83 @@ pub async fn create_user(
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Access token + HttpOnly refresh cookie", body = LoginResponse),
+        (status = 422, description = "Validation failed"),
         (status = 401, description = "Invalid credentials"),
-        (status = 403, description = "Account is blocked"),
+        (status = 403, description = "Account is blocked or temporarily locked"),
+        (status = 429, description = "Too many requests from this IP"),
         (status = 500, description = "Internal error"),
     )
 )]
 pub async fn login(
     State(state): State<AppState>,
     cookies: Cookies,
-    Json(payload): Json<LoginRequest>,
+    Json(mut payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse<()>>)> {
+    payload.username = payload.username.trim().to_string();
+
+    payload.validate().map_err(validation_error_response)?;
+
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at \
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at \
          FROM users WHERE username = ?",
     )
     .bind(&payload.username)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))))?;
- 
+    .map_err(|_| {
+        tracing::warn!(username = %payload.username, "login failed: unknown username");
+        (StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials")))
+    })?;
+
     if user.is_blocked {
+        tracing::warn!(username = %user.username, "login failed: account is blocked");
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Account is blocked"))));
     }
- 
+
+    if let Some(locked_until) = user.locked_until {
+        if locked_until > Utc::now() {
+            tracing::warn!(username = %user.username, %locked_until, "login failed: account temporarily locked");
+            return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Account temporarily locked due to too many failed attempts. Try again later."))));
+        }
+    }
+
     let valid = bcrypt::verify(&payload.pswd, &user.pswd)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Verification failed"))))?;
- 
+
     if !valid {
+        let attempts = user.failed_attempts + 1;
+        let locked_until = if attempts >= MAX_FAILED_LOGIN_ATTEMPTS {
+            Some(Utc::now() + chrono::Duration::minutes(LOCKOUT_MINUTES))
+        } else {
+            None
+        };
+        let attempts_after_lock = if locked_until.is_some() { 0 } else { attempts };
+
+        sqlx::query("UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?")
+            .bind(attempts_after_lock)
+            .bind(locked_until)
+            .bind(user.id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+        if locked_until.is_some() {
+            tracing::warn!(username = %user.username, attempts, "login failed: too many attempts, account locked for {LOCKOUT_MINUTES} minutes");
+        } else {
+            tracing::warn!(username = %user.username, attempts, "login failed: invalid password");
+        }
+
         return Err((StatusCode::UNAUTHORIZED, Json(ApiResponse::<()>::error("Invalid credentials"))));
     }
- 
+
+    if user.failed_attempts != 0 || user.locked_until.is_some() {
+        sqlx::query("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = ?")
+            .bind(user.id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+    }
+
     let access_token = generate_access_token(user.id, &user.username, user.is_admin, &state.jwt_secret)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Token generation failed"))))?;
  
@@ -210,7 +279,7 @@ pub async fn refresh(
         ))?;
  
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at \
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at \
          FROM users WHERE id = ?",
     )
     .bind(claims.user_id)
@@ -311,7 +380,7 @@ pub async fn get_all_users(
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
 
-    let users = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, is_admin, is_blocked, created_at, modified_at FROM users ORDER BY id")
+    let users = sqlx::query_as::<_, User>("SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, created_at, modified_at FROM users ORDER BY id")
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
@@ -324,6 +393,7 @@ pub async fn get_all_users(
 /// Fields missing from the payload keep their current value.
 ///
 /// # Errors
+/// - `422 Unprocessable Entity` — invalid username/email/password (see field rules on `UpdateUser`)
 /// - `403 Forbidden` — access denied
 /// - `404 Not Found` — user not found
 /// - `500 Internal Server Error` — database error
@@ -335,6 +405,7 @@ pub async fn get_all_users(
     request_body = UpdateUser,
     responses(
         (status = 200, description = "User updated"),
+        (status = 422, description = "Validation failed"),
         (status = 403, description = "Access denied"),
         (status = 404, description = "User not found"),
         (status = 500, description = "Internal error"),
@@ -345,11 +416,16 @@ pub async fn update_user(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Extension(claims): Extension<Claims>,
-    Json(payload): Json<UpdateUser>,
+    Json(mut payload): Json<UpdateUser>,
 ) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
     if !claims.is_admin && claims.user_id != id {
         return Err((StatusCode::FORBIDDEN, Json(ApiResponse::<()>::error("Access denied"))));
     }
+
+    payload.username = payload.username.map(|u| u.trim().to_string());
+    payload.email = payload.email.map(|e| e.trim().to_lowercase());
+
+    payload.validate().map_err(validation_error_response)?;
 
     let existing = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(id)
