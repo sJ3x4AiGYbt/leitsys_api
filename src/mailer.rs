@@ -63,3 +63,28 @@ pub async fn send_verification_email(
     AsyncTransport::send(mailer, email).await?;
     Ok(())
 }
+
+pub async fn send_password_reset_email(
+    mailer: &Mailer,
+    from: &str,
+    to_email: &str,
+    to_username: &str,
+    reset_link: &str,
+) -> anyhow::Result<()> {
+    let body = format!(
+        "Hi {to_username},\n\n\
+         We received a request to reset your password. Open this link to choose a new one:\n\
+         {reset_link}\n\n\
+         This link expires in 1 hour. If you didn't request this, you can safely ignore this email.",
+    );
+
+    let email = Message::builder()
+        .from(from.parse()?)
+        .to(format!("{to_username} <{to_email}>").parse()?)
+        .subject("Reset your password")
+        .header(ContentType::TEXT_PLAIN)
+        .body(body)?;
+
+    AsyncTransport::send(mailer, email).await?;
+    Ok(())
+}

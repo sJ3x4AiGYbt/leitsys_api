@@ -2,7 +2,7 @@ use utoipa::OpenApi;
 
 use crate::models::{
     User, CreateUser, UpdateUser, LoginRequest, LoginResponse,
-    VerifyEmailRequest, ResendVerificationRequest,
+    VerifyEmailRequest, ResendVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest,
     Category, CreateCategory, UpdateCategory,
     Step, CreateStep, UpdateStep,
     Question, CreateQuestion, UpdateQuestion, GetQuestionsParams,
@@ -22,6 +22,8 @@ use crate::models::{
         crate::routes::users::login,
         crate::routes::users::verify_email,
         crate::routes::users::resend_verification,
+        crate::routes::users::forgot_password,
+        crate::routes::users::reset_password,
         // Users
         crate::routes::users::get_user,
         crate::routes::users::get_all_users,
@@ -63,7 +65,7 @@ use crate::models::{
     components(
         schemas(
             User, CreateUser, UpdateUser, LoginRequest, LoginResponse,
-            VerifyEmailRequest, ResendVerificationRequest,
+            VerifyEmailRequest, ResendVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest,
             Category, CreateCategory, UpdateCategory,
             Step, CreateStep, UpdateStep,
             Question, CreateQuestion, UpdateQuestion, GetQuestionsParams,

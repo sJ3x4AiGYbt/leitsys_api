@@ -36,6 +36,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("002_login_security.sql", include_str!("../data/002_login_security.sql")),
     ("003_refresh_sessions.sql", include_str!("../data/003_refresh_sessions.sql")),
     ("004_email_verification.sql", include_str!("../data/004_email_verification.sql")),
+    ("005_password_reset.sql", include_str!("../data/005_password_reset.sql")),
 ];
 
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {

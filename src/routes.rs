@@ -40,8 +40,9 @@ use crate::routes::{
         create_step, delete_step, get_all_steps, get_my_steps, get_step, update_step,
     },
     users::{
-        create_user, delete_user, get_all_users, get_user, login, logout, mark_admin, mark_blocked,
-        refresh, resend_verification, update_user, verify_email,
+        create_user, delete_user, forgot_password, get_all_users, get_user, login, logout,
+        mark_admin, mark_blocked, refresh, resend_verification, reset_password, update_user,
+        verify_email,
     },
 };
 
@@ -56,6 +57,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/register", post(create_user))
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
+        .route("/auth/forgot-password", post(forgot_password))
+        .route("/auth/reset-password", post(reset_password))
         .layer(axum_middleware::from_fn_with_state(
             auth_rate_limiter,
             rate_limit::rate_limit,
