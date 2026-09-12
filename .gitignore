@@ -25,3 +25,5 @@ target
 
 *.env*
 *.db
+
+tmp.txt

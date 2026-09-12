@@ -12,14 +12,15 @@ use validator::Validate;
 
 use crate::{
     db::AppState,
-    mailer::send_verification_email,
+    mailer::{send_verification_email, send_password_reset_email},
     middleware::{
         generate_access_token, generate_refresh_token, extract_refresh_claims,
         revoke_refresh_session, revoke_all_refresh_sessions,
     },
     models::{
         ApiResponse, Claims, User, CreateUser, UpdateUser, LoginRequest, LoginResponse,
-        VerifyEmailRequest, ResendVerificationRequest, validation_error_response,
+        VerifyEmailRequest, ResendVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest,
+        validation_error_response,
     },
 };
 
@@ -29,6 +30,9 @@ const MAX_FAILED_LOGIN_ATTEMPTS: i64 = 5;
 const LOCKOUT_MINUTES: i64 = 15;
 /// How long an email verification link stays valid.
 const EMAIL_VERIFICATION_HOURS: i64 = 24;
+/// How long a password reset link stays valid. Kept short since, unlike email
+/// verification, a leaked link directly grants account takeover.
+const PASSWORD_RESET_MINUTES: i64 = 60;
 
 /// Generates a verification token, stores it, and emails the link to the
 /// user. Errors are the caller's to decide whether to surface or just log —
@@ -73,6 +77,50 @@ async fn issue_and_send_verification_email(
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, %email, "failed to send verification email"),
             Err(_) => tracing::error!(%email, "sending verification email timed out"),
+        }
+    });
+
+    Ok(())
+}
+
+/// Generates a password reset token, stores it, and emails the link to the
+/// user. Same fire-and-forget rationale as `issue_and_send_verification_email`.
+async fn issue_and_send_password_reset_email(
+    state: &AppState,
+    user_id: i64,
+    username: &str,
+    email: &str,
+) -> anyhow::Result<()> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let expires_at = Utc::now() + chrono::Duration::minutes(PASSWORD_RESET_MINUTES);
+
+    sqlx::query("INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)")
+        .bind(&token)
+        .bind(user_id)
+        .bind(expires_at)
+        .execute(&state.db)
+        .await?;
+
+    let frontend_origin = std::env::var("FRONTEND_ORIGIN")
+        .map_err(|_| anyhow::anyhow!("FRONTEND_ORIGIN environment variable must be set"))?;
+    let reset_link = format!("{frontend_origin}/reset-password?token={token}");
+
+    let mailer = state.mailer.clone();
+    let mail_from = state.mail_from.clone();
+    let email = email.to_string();
+    let username = username.to_string();
+
+    tokio::spawn(async move {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            send_password_reset_email(&mailer, &mail_from, &email, &username, &reset_link),
+        )
+        .await;
+
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, %email, "failed to send password reset email"),
+            Err(_) => tracing::error!(%email, "sending password reset email timed out"),
         }
     });
 
@@ -317,6 +365,133 @@ pub async fn resend_verification(
     Ok(Json(ApiResponse::<()>::message(
         "If this email is registered and not yet verified, a new verification link has been sent.",
     )))
+}
+
+/// Requests a password reset link for an account.
+///
+/// Always returns the same generic message regardless of whether the email
+/// is registered, to avoid leaking account existence — a reset email is only
+/// actually sent when there's an active account behind it.
+#[utoipa::path(
+    post,
+    path = "/auth/forgot-password",
+    tag = "auth",
+    request_body = ForgotPasswordRequest,
+    responses(
+        (status = 200, description = "Generic acknowledgement (see description)"),
+        (status = 422, description = "Validation failed"),
+        (status = 429, description = "Too many requests from this IP"),
+    )
+)]
+pub async fn forgot_password(
+    State(state): State<AppState>,
+    Json(mut payload): Json<ForgotPasswordRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    payload.email = payload.email.trim().to_lowercase();
+    payload.validate().map_err(validation_error_response)?;
+
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, pswd, is_admin, is_blocked, failed_attempts, locked_until, email_verified_at, created_at, modified_at \
+         FROM users WHERE email = ?",
+    )
+    .bind(&payload.email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    if let Some(user) = user {
+        // A blocked account can't log in even after a reset, so don't hand
+        // whoever controls this mailbox a working password for it.
+        if !user.is_blocked {
+            if let Err(e) = issue_and_send_password_reset_email(&state, user.id, &user.username, &user.email).await {
+                tracing::error!(error = %e, email = %user.email, "failed to send password reset email");
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::<()>::message(
+        "If this email is registered, a password reset link has been sent.",
+    )))
+}
+
+/// Resets a user's password using the token sent by `/auth/forgot-password`.
+///
+/// Revokes every existing refresh session for the account, so any
+/// stolen-but-unused refresh token stops working immediately.
+///
+/// # Errors
+/// - `422 Unprocessable Entity` — malformed token or password not meeting policy
+/// - `400 Bad Request` — token unknown, already used, or expired
+/// - `429 Too Many Requests` — too many attempts from this IP
+/// - `500 Internal Server Error` — database error
+#[utoipa::path(
+    post,
+    path = "/auth/reset-password",
+    tag = "auth",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset"),
+        (status = 422, description = "Validation failed"),
+        (status = 400, description = "Invalid, already-used or expired token"),
+        (status = 429, description = "Too many requests from this IP"),
+        (status = 500, description = "Internal error"),
+    )
+)]
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(payload): Json<ResetPasswordRequest>,
+) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+    payload.validate().map_err(validation_error_response)?;
+
+    let row = sqlx::query_as::<_, (i64, i64, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)>(
+        "SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token = ?",
+    )
+    .bind(&payload.token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    let (token_id, user_id, expires_at, used_at) = row.ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse::<()>::error("Invalid password reset token")),
+    ))?;
+
+    if used_at.is_some() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error("This password reset link has already been used"))));
+    }
+    if expires_at < Utc::now() {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error("This password reset link has expired"))));
+    }
+
+    let hashed = hash(&payload.pswd, DEFAULT_COST)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error("Hashing failed"))))?;
+
+    let mut tx = state.db.begin().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    sqlx::query("UPDATE users SET pswd = ?, failed_attempts = 0, locked_until = NULL, modified_at = ? WHERE id = ?")
+        .bind(&hashed)
+        .bind(Utc::now())
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    sqlx::query("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?")
+        .bind(Utc::now())
+        .bind(token_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    tx.commit().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    revoke_all_refresh_sessions(&state.db, user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+    Ok(Json(ApiResponse::<()>::message("Password reset successfully.")))
 }
 
 /// Authenticates a user.

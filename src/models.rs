@@ -116,6 +116,22 @@ pub struct ResendVerificationRequest {
     pub email: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct ForgotPasswordRequest {
+    #[validate(email, length(max = 254))]
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct ResetPasswordRequest {
+    #[validate(length(min = 1, max = 128))]
+    pub token: String,
+    /// 10-72 bytes. Must contain at least one lowercase letter, one uppercase
+    /// letter, one digit and one special character.
+    #[validate(custom(function = "validate_password"))]
+    pub pswd: String,
+}
+
 // ─── Category 
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
