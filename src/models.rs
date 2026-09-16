@@ -257,6 +257,11 @@ pub struct UpdateAnswer {
     pub user_response: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreatedAnswer {
+    pub id: i64,
+}
+
 // ─── JWT Claims 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

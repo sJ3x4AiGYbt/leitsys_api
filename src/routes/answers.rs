@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     db::AppState,
-    models::{Answer, ApiResponse, Claims, CreateAnswer, UpdateAnswer, Question},
+    models::{Answer, ApiResponse, Claims, CreateAnswer, CreatedAnswer, UpdateAnswer, Question},
 };
 
 
@@ -28,7 +28,7 @@ use crate::{
     tag = "answers",
     request_body = CreateAnswer,
     responses(
-        (status = 200, description = "Answer recorded"),
+        (status = 200, description = "Answer recorded", body = CreatedAnswer),
         (status = 403, description = "Access denied"),
         (status = 404, description = "Question or previous answer not found"),
         (status = 500, description = "Internal error"),
@@ -39,7 +39,7 @@ pub async fn create_answer(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateAnswer>,
-) -> Result<Json<ApiResponse<()>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<CreatedAnswer>>, (StatusCode, Json<ApiResponse<()>>)> {
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = ?")
         .bind(payload.question_id)
         .fetch_one(&state.db)
@@ -73,7 +73,7 @@ pub async fn create_answer(
         0
     };
 
-    sqlx::query("INSERT INTO answers (question_id, user_id, user_response, step, is_correct, days_since_last_answer, days_since_creation, late_spacing_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    let result = sqlx::query("INSERT INTO answers (question_id, user_id, user_response, step, is_correct, days_since_last_answer, days_since_creation, late_spacing_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(&payload.question_id)
     .bind(claims.user_id)
     .bind(&payload.user_response)
@@ -86,7 +86,7 @@ pub async fn create_answer(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
 
-    Ok(Json(ApiResponse::<()>::message("Answer recorded successfully.")))
+    Ok(Json(ApiResponse::ok(CreatedAnswer { id: result.last_insert_rowid() })))
 }
 
 /// Returns an answer by its ID.
