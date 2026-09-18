@@ -1,16 +1,8 @@
-mod db;
-mod models;
-mod middleware;
-mod rate_limit;
-mod csrf;
-mod mailer;
-mod routes;
-mod cors;
-mod swagger;
-
 use std::env;
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use leitsys_api::{db, mailer, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
