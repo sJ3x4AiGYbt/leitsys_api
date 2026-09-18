@@ -234,9 +234,23 @@ pub async fn update_step(
                 ))));
             }
 
+            // `(user_id, step_order)` is UNIQUE, so shifting other rows into
+            // this row's current slot before it moves out of the way would
+            // fail. Vacate it into negative space first, then shift the
+            // affected range there too (a plain +/-1 update on the range can
+            // transiently collide with a not-yet-updated neighbor still
+            // holding the target value) before landing everything on its
+            // final value below.
+            sqlx::query("UPDATE steps SET step_order = ? WHERE id = ?")
+                .bind(-old_order)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
             if new_order < old_order {
                 sqlx::query(
-                    "UPDATE steps SET step_order = step_order + 1 
+                    "UPDATE steps SET step_order = -step_order
                      WHERE user_id = ? AND step_order >= ? AND step_order < ? AND id != ?"
                 )
                 .bind(existing.user_id)
@@ -246,14 +260,34 @@ pub async fn update_step(
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+                sqlx::query(
+                    "UPDATE steps SET step_order = -step_order + 1
+                     WHERE user_id = ? AND step_order < 0 AND id != ?"
+                )
+                .bind(existing.user_id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
             } else {
                 sqlx::query(
-                    "UPDATE steps SET step_order = step_order - 1 
+                    "UPDATE steps SET step_order = -step_order
                      WHERE user_id = ? AND step_order > ? AND step_order <= ? AND id != ?"
                 )
                 .bind(existing.user_id)
                 .bind(old_order)
                 .bind(new_order)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
+
+                sqlx::query(
+                    "UPDATE steps SET step_order = -step_order - 1
+                     WHERE user_id = ? AND step_order < 0 AND id != ?"
+                )
+                .bind(existing.user_id)
                 .bind(id)
                 .execute(&mut *tx)
                 .await
@@ -341,9 +375,12 @@ pub async fn delete_step(
     let mut tx = state.db.begin().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
 
+    // Through `tx`, not the pool — the transaction already holds the only
+    // connection under a small pool, and a second, unrelated pool checkout
+    // here would just wait on it forever.
     let question_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE current_step_id = ?")
         .bind(id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::error(e.to_string()))))?;
 

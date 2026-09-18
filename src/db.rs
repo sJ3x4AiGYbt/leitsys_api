@@ -13,10 +13,26 @@ pub struct AppState {
 
 pub async fn create_pool() -> anyhow::Result<SqlitePool> {
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./leitsys.db".into());
-    let connect_options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    connect(&database_url).await
+}
+
+/// Opens (creating if missing) and migrates the database at `database_url`.
+///
+/// Exposed separately from `create_pool` so tests can point it at
+/// `sqlite::memory:` without touching the `DATABASE_URL` env var.
+pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    connect_with(database_url, 5).await
+}
+
+/// Same as `connect`, but with an explicit pool size. Tests against
+/// `sqlite::memory:` must pass `1` — every new connection to an in-memory
+/// SQLite database starts out as its own separate, empty database, so a
+/// multi-connection pool would silently scatter data across several DBs.
+pub async fn connect_with(database_url: &str, max_connections: u32) -> anyhow::Result<SqlitePool> {
+    let connect_options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .connect_with(connect_options)
         .await?;
 

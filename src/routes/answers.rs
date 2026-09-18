@@ -247,8 +247,10 @@ pub async fn update_answer(
 ///
 /// - If a next step exists: `current_step_id` is advanced and `next_review_date`
 ///   is recalculated based on the `spacing_days` of the new step.
-/// - If it was the last step: the question is archived (`is_archived = TRUE`)
-///   and `next_review_date` is set to `NULL`.
+/// - If it was the last step: the question is archived (`is_archived = TRUE`);
+///   `next_review_date` is left as-is (the column is `NOT NULL`) but is no
+///   longer meaningful once archived, since every query filters on
+///   `is_archived = FALSE`.
 ///
 /// # Errors
 /// - `403 Forbidden` — access denied
@@ -322,7 +324,7 @@ pub async fn good_answer(
         }
         None => {
             sqlx::query(
-                "UPDATE questions SET is_archived = TRUE, next_review_date = NULL, modified_at = ?
+                "UPDATE questions SET is_archived = TRUE, modified_at = ?
                  WHERE id = ?",
             )
             .bind(Utc::now())
