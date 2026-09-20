@@ -23,7 +23,7 @@ target
 
 # Added by cargo
 
-*.env*
+*.env.*
 *.db
 
 tmp.txt

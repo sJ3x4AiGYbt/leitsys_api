@@ -2,12 +2,30 @@ services:
   api:
     image: ghcr.io/sJ3x4AiGYbt/leitsys_api:latest
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # Not published to the host: only cloudflared and web need to reach it,
+    # and they do so over the compose network by service name.
     volumes:
       - leitsys_prod_data:/app/data
     env_file:
       - .env.prod
+
+  web:
+    image: ghcr.io/sJ3x4AiGYbt/leitsys_web:latest
+    restart: unless-stopped
+
+  # Outbound-only tunnel to Cloudflare — no port needs to be opened on the
+  # home router. Public hostname -> service routing (app.* -> web:80,
+  # api.* -> api:3000) is configured in the Cloudflare Zero Trust dashboard,
+  # not here; this container just needs the tunnel token from .env.prod.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file:
+      - .env.prod
+    depends_on:
+      - api
+      - web
 
 volumes:
   leitsys_prod_data:
