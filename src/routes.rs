@@ -1,6 +1,7 @@
 pub mod answers;
 pub mod categories;
 pub mod questions;
+pub mod quiz;
 pub mod steps;
 pub mod users;
 
@@ -8,7 +9,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware as axum_middleware,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use tower_http::trace::TraceLayer;
 use tower_cookies::CookieManagerLayer;
@@ -31,6 +32,10 @@ use crate::routes::{
     categories::{
         create_category, delete_category, get_all_categories, get_category, get_my_categories,
         update_category,
+    },
+    quiz::{
+        clear_quiz_bank, delete_quiz_question, get_quiz_questions, import_quiz,
+        reset_quiz_progress, submit_quiz_attempt,
     },
     questions::{
         create_question, delete_question, get_all_questions, get_my_questions, get_question,
@@ -76,6 +81,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/logout", post(logout))
         .layer(axum_middleware::from_fn(csrf::verify_origin));
 
+    // A pasted or uploaded quiz file can be far bigger than any other JSON
+    // body; the text itself is capped at 1M characters by validation.
+    let quiz_import = Router::new()
+        .route("/quiz/import", post(import_quiz))
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024));
+
     let user_routes = Router::new()
         .route("/users", get(get_all_users))
         .route(
@@ -114,6 +125,11 @@ pub fn build_router(state: AppState) -> Router {
             get(get_step).put(update_step).delete(delete_step),
         )
         .route("/steps/user/:id", get(get_my_steps))
+        .route("/quiz/questions", get(get_quiz_questions).delete(clear_quiz_bank))
+        .route("/quiz/questions/:id", delete(delete_quiz_question))
+        .route("/quiz/questions/:id/attempt", post(submit_quiz_attempt))
+        .route("/quiz/progress", delete(reset_quiz_progress))
+        .merge(quiz_import)
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::require_auth,

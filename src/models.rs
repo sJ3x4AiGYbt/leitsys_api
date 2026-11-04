@@ -262,6 +262,129 @@ pub struct CreatedAnswer {
     pub id: i64,
 }
 
+// ─── Quiz
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct QuizOption {
+    /// Original letter, `A` to `H`.
+    pub letter: String,
+    pub text: String,
+    /// Explanation shown once the question is answered. Empty if none.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Raw `quiz_questions` row: `options` is JSON and `correct` a
+/// comma-separated letter list, both decoded into `QuizQuestion`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct QuizQuestionRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub num: i64,
+    pub category: String,
+    pub prompt: String,
+    pub options: String,
+    pub correct: String,
+    pub attempts: i64,
+    pub successes: i64,
+    pub last_correct: Option<bool>,
+    pub last_answered_at: Option<DateTime<Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub modified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QuizQuestion {
+    pub id: i64,
+    /// The `N` of the `Quiz N` header it was imported from.
+    pub num: i64,
+    /// e.g. `Rootkits / Detection`.
+    pub category: String,
+    pub prompt: String,
+    pub options: Vec<QuizOption>,
+    /// Letters of the correct options, sorted.
+    pub correct: Vec<String>,
+    pub attempts: i64,
+    pub successes: i64,
+    /// `null` if never answered.
+    pub last_correct: Option<bool>,
+    pub last_answered_at: Option<DateTime<Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub modified_at: Option<DateTime<Utc>>,
+}
+
+impl From<QuizQuestionRow> for QuizQuestion {
+    fn from(row: QuizQuestionRow) -> Self {
+        Self {
+            id: row.id,
+            num: row.num,
+            category: row.category,
+            prompt: row.prompt,
+            options: serde_json::from_str(&row.options).unwrap_or_default(),
+            correct: row.correct.split(',').filter(|l| !l.is_empty()).map(String::from).collect(),
+            attempts: row.attempts,
+            successes: row.successes,
+            last_correct: row.last_correct,
+            last_answered_at: row.last_answered_at,
+            created_at: row.created_at,
+            modified_at: row.modified_at,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportMode {
+    /// Keep the bank, insert only the questions not already in it.
+    #[default]
+    Add,
+    /// Make the bank exactly the imported questions. Questions present in
+    /// both keep their progress.
+    Replace,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct ImportQuiz {
+    /// Quizzes in the text format (`Quiz N`, `* Category :`, `* Question :`,
+    /// `* Answer A :`, `* Detail answer A :`, `* Correct answer :`, `---`).
+    #[validate(length(min = 1, max = 1_000_000))]
+    pub text: String,
+    #[serde(default)]
+    pub mode: ImportMode,
+    /// Only report what the import would do, without writing anything.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportReport {
+    /// Valid questions found in the text.
+    pub read: usize,
+    /// Blocks skipped for lack of a prompt, two options or a correct answer.
+    pub invalid: usize,
+    /// Distinct questions among `read` (what `replace` would keep).
+    pub unique: usize,
+    /// Distinct questions not already in the bank (what `add` would insert).
+    pub fresh: usize,
+    /// Questions actually inserted. Always 0 on a dry run.
+    pub added: usize,
+    /// Bank size after the import (current size on a dry run).
+    pub total: usize,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Validate)]
+pub struct QuizAttempt {
+    /// Letters picked, using the original letters (`QuizOption::letter`).
+    #[validate(length(min = 1, max = 8))]
+    pub selected: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttemptResult {
+    pub correct: bool,
+    pub correct_letters: Vec<String>,
+}
+
 // ─── JWT Claims 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

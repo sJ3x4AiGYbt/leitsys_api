@@ -7,6 +7,7 @@ use crate::models::{
     Step, CreateStep, UpdateStep,
     Question, CreateQuestion, UpdateQuestion, GetQuestionsParams,
     Answer, CreateAnswer, UpdateAnswer,
+    QuizOption, QuizQuestion, ImportMode, ImportQuiz, ImportReport, QuizAttempt, AttemptResult,
 };
 
 #[derive(OpenApi)]
@@ -61,6 +62,13 @@ use crate::models::{
         crate::routes::answers::delete_answer,
         crate::routes::answers::good_answer,
         crate::routes::answers::bad_answer,
+        // Quiz
+        crate::routes::quiz::get_quiz_questions,
+        crate::routes::quiz::import_quiz,
+        crate::routes::quiz::delete_quiz_question,
+        crate::routes::quiz::clear_quiz_bank,
+        crate::routes::quiz::submit_quiz_attempt,
+        crate::routes::quiz::reset_quiz_progress,
     ),
     components(
         schemas(
@@ -70,6 +78,7 @@ use crate::models::{
             Step, CreateStep, UpdateStep,
             Question, CreateQuestion, UpdateQuestion, GetQuestionsParams,
             Answer, CreateAnswer, UpdateAnswer,
+            QuizOption, QuizQuestion, ImportMode, ImportQuiz, ImportReport, QuizAttempt, AttemptResult,
         )
     ),
     tags(
@@ -79,6 +88,7 @@ use crate::models::{
         (name = "steps",      description = "Questions spaced-repetition steps"),
         (name = "questions",  description = "Questions"),
         (name = "answers",    description = "Answers and review workflow"),
+        (name = "quiz",       description = "Multiple-choice quiz bank and progress"),
     ),
     security(
         ("bearer_auth" = [])
