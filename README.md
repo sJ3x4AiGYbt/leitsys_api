@@ -1,10 +1,20 @@
 # Leitsys - Application Programming Interface
 
+## 1st 
+
 Implementation of the **Ebbinghaus spaced repetition method** for learning. Each question progresses through **steps** whose intervals increase with correct answers. An incorrect answer resets the question to the first step.
 
 ```
 Question created → Step 1 (1j) → Step 2 (3j) → … → Step 7 (90j) → Archived ✓
                                            → bad answer → return Step 1
+```
+
+## 2nd option: quiz
+
+Each user also has a private **multiple-choice quiz bank**. Quizzes are imported as plain text, and every answer updates the progress of the question (attempts, successes, last result).
+
+```
+Text import → Quiz bank → Answer → Progress updated (attempts / successes)
 ```
 
 ## Details
